@@ -1,0 +1,94 @@
+name: Build Flow Glass APK
+
+# Run it by hand: Actions tab -> "Build Flow Glass APK" -> Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Your changes live in one file, flow-glass-overlay.zip, in the repo root.
+      # Its files are copied over the project right before the build.
+      - name: Apply the Flow Glass overlay
+        run: |
+          if [ -f flow-glass-overlay.zip ]; then
+            unzip -o flow-glass-overlay.zip -d .
+            echo "Overlay applied."
+          else
+            echo "::error::flow-glass-overlay.zip was not found in the repository root."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # The same signing key is reused on every build, so each new APK installs
+      # over the previous one without uninstalling. GitHub keeps it in a private
+      # cache; if the cache is ever cleared, a new key is made and you uninstall once.
+      - name: Restore signing key
+        id: key
+        uses: actions/cache@v4
+        with:
+          path: release.keystore
+          key: flow-glass-signing-key-v1
+
+      - name: Create signing key if there is none
+        run: |
+          if [ ! -f release.keystore ]; then
+            keytool -genkeypair -keystore release.keystore -storetype PKCS12 \
+              -storepass flowglass -keypass flowglass -alias flowglass \
+              -keyalg RSA -keysize 2048 -validity 36500 \
+              -dname "CN=Flow Glass,O=Personal,C=US"
+            echo "Created a new signing key."
+          else
+            echo "Using the saved signing key."
+          fi
+
+      - name: Build the APK
+        run: >
+          ./gradlew :app:assembleGithubRelease
+          --max-workers=1 --build-cache --stacktrace
+        env:
+          STORE_PASSWORD: flowglass
+          KEY_ALIAS: flowglass
+          KEY_PASSWORD: flowglass
+
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/github/release/app-github-universal-release.apk "out/Flow-Glass-${GITHUB_RUN_NUMBER}.apk"
+          ls -lh out
+
+      - name: Keep the APK as a download on this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: Flow-Glass-APK
+          path: out/*.apk
+
+      # Easiest way to get it on your phone: open the Releases page and tap the APK.
+      - name: Publish the APK on the Releases page
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: glass-build-${{ github.run_number }}
+          name: Flow Glass build ${{ github.run_number }}
+          prerelease: true
+          files: out/*.apk
